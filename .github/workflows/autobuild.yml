@@ -4,6 +4,8 @@ on:
   push:
     branches-ignore:
       - dependabot/**
+    tags:
+      - v*
   pull_request:
   workflow_dispatch:
 
@@ -403,6 +405,62 @@ jobs:
           path: |
             retroarch/mkxp-z_libretro.js
             retroarch/mkxp-z_libretro.wasm
+
+  # Publishes the core + frontend as a versioned tarball that consumers (RomM) pin by sha256.
+  release:
+    needs: build-frontend
+    name: Publish release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Download core + frontend
+        uses: actions/download-artifact@v8
+        with:
+          name: mkxp-z_libretro.wasm
+          path: core
+
+      - name: Package
+        run: |
+          name="mkxp-z-libretro-emscripten-${GITHUB_REF_NAME}"
+          mkdir "$name"
+          mv core/mkxp-z_libretro.js core/mkxp-z_libretro.wasm "$name/"
+          cp mkxp-z/COPYING "$name/COPYING.mkxp-z"
+          cp retroarch/COPYING "$name/COPYING.retroarch"
+          {
+            echo "Built by https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "from ${GITHUB_REPOSITORY}@${GITHUB_SHA} (${GITHUB_REF_NAME})."
+            echo
+            echo "Corresponding source (submodule, commit, repository):"
+            git submodule foreach --quiet 'echo "$sm_path $(git rev-parse HEAD) $(git config --get remote.origin.url)"'
+            echo
+            echo "Emscripten SDK 4.0.8, WASI SDK 30, Binaryen 126."
+            echo "Third-party licenses for the libraries linked into the core are in the mkxp-z sources above."
+          } > "$name/SOURCES.txt"
+          cat "$name/SOURCES.txt"
+          tar --sort=name --owner=0 --group=0 --numeric-owner -czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" | tee "$name.tar.gz.sha256"
+          echo "NAME=$name" >> "$GITHUB_ENV"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "sha256: \`$(cut -d ' ' -f 1 "$NAME.tar.gz.sha256")\`"
+            echo
+            echo '```'
+            cat "$NAME/SOURCES.txt"
+            echo '```'
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" "$NAME.tar.gz" "$NAME.tar.gz.sha256" \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md --prerelease
 
   build-retroarch-web-player:
     needs: build-frontend
